@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/network/gateway_service.dart';
-import '../../core/models/gateway_config.dart';
 import '../../core/network/connection_state.dart';
 import '../../core/models/message.dart';
 import '../../core/models/approval.dart';
@@ -203,68 +202,5 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   void _showConnectionDialog() {
     Navigator.push(context, MaterialPageRoute(builder: (_) => ConnectionScreen()));
-  }
-}
-
-// Connection Dialog
-class ConnectionDialog extends ConsumerStatefulWidget {
-  const ConnectionDialog({super.key});
-
-  @override
-  ConsumerState<ConnectionDialog> createState() => _ConnectionDialogState();
-}
-
-class _ConnectionDialogState extends ConsumerState<ConnectionDialog> {
-  final _hostController = TextEditingController(text: '192.168.');
-  final _portController = TextEditingController(text: '8642');
-  final _tokenController = TextEditingController();
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('连接到 Hermes Gateway'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: _hostController,
-            decoration: const InputDecoration(labelText: '主机 / Tailscale IP'),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _portController,
-            decoration: const InputDecoration(labelText: '端口'),
-            keyboardType: TextInputType.number,
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _tokenController,
-            decoration: const InputDecoration(labelText: 'Token (可选)'),
-            obscureText: true,
-          ),
-          const SizedBox(height: 16),
-          const Text(
-            '提示: 使用 Tailscale 获取你 PC 的 Tailscale IP，或在同一 WiFi 下使用局域网 IP',
-            style: TextStyle(fontSize: 12, color: Colors.grey),
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-        FilledButton(
-          onPressed: () {
-            final config = GatewayConfig(
-              host: _hostController.text.trim(),
-              port: int.tryParse(_portController.text) ?? 8642,
-              token: _tokenController.text.isNotEmpty ? _tokenController.text : null,
-            );
-            ref.read(gatewayConfigProvider.notifier).configure(config);
-            ref.read(gatewayServiceProvider)?.connect();
-            Navigator.pop(context);
-          },
-          child: const Text('连接'),
-        ),
-      ],
-    );
   }
 }

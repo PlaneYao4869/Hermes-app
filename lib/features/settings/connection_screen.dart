@@ -171,40 +171,33 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
     _connect(config);
   }
 
-  Future<void> _connect(GatewayConfig config) async {
+  void _connect(GatewayConfig config) {
+    // Just set config — the provider auto-creates service and connects
     ref.read(gatewayConfigProvider.notifier).configure(config);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('正在连接 \${config.host}:\${config.port}...')),
+    );
 
-    // Wait for provider to rebuild with new config
-    await Future.delayed(const Duration(milliseconds: 100));
-
-    final gateway = ref.read(gatewayServiceProvider);
-    if (gateway == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('连接初始化失败')),
-        );
+    // Listen for connection result
+    late final ProviderSubscription sub;
+    sub = ref.listenManual(connectionStateProvider, (prev, next) {
+      if (next.isConnected) {
+        sub.close();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('连接成功!')),
+          );
+          Navigator.pop(context);
+        }
+      } else if (next.status == ConnectionStatus.error) {
+        sub.close();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('连接失败: \${next.errorMessage ?? "未知错误"}'), backgroundColor: Colors.red),
+          );
+        }
       }
-      return;
-    }
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('正在连接 \${config.host}:\${config.port}...')),
-      );
-    }
-
-    final success = await gateway.connect();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(success ? '连接成功!' : '连接失败，请检查地址和网络'),
-          backgroundColor: success ? null : Colors.red,
-        ),
-      );
-      if (success) {
-        Navigator.pop(context);
-      }
-    }
+    });
   }
 }
 
