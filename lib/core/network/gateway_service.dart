@@ -41,7 +41,15 @@ class GatewayServiceNotifier extends StateNotifier<GatewayService?> {
     });
   }
 
+  @override
+  void dispose() {
+    state?.dispose();
+    super.dispose();
+  }
+
   Future<void> _createAndConnect(GatewayConfig config) async {
+    // Dispose old service before creating new one
+    state?.dispose();
     final service = GatewayService(config, ref);
     state = service;
     await service.connect();
@@ -101,46 +109,85 @@ class GatewayService {
     return list.map((m) => ChatMessage.fromJson(m as Map<String, dynamic>)).toList();
   }
 
-  /// Send a chat message via the streaming endpoint.
+  /// Send a chat message. If sessionId exists, sends to that session (continues conversation).
+  /// If no sessionId, uses the general chat completions endpoint.
   Future<String> sendChat(String content, {String? sessionId}) async {
-    final body = <String, dynamic>{
-      'messages': [
-        {'role': 'user', 'content': content}
-      ],
-      'stream': true,
-    };
-    if (sessionId != null) body['session_id'] = sessionId;
-
-    final uri = Uri.parse('${config.httpUrl}/v1/chat/completions');
-    final request = http.Request('POST', uri);
-    request.headers.addAll(_headers);
-    request.body = jsonEncode(body);
-
-    final streamedResponse = await _client.send(request);
+    final streamedResponse = await _sendChatRequest(content, sessionId: sessionId);
     String fullContent = '';
+    String currentEvent = '';
 
     await for (final chunk in streamedResponse.stream.transform(utf8.decoder).transform(const LineSplitter())) {
-      if (chunk.startsWith('data: ')) {
-        final data = chunk.substring(6).trim();
-        if (data == '[DONE]') break;
-        try {
-          final json = jsonDecode(data) as Map<String, dynamic>;
-          final choices = json['choices'] as List?;
-          if (choices != null && choices.isNotEmpty) {
-            final delta = choices[0]['delta'] as Map<String, dynamic>?;
-            if (delta != null) {
-              final c = delta['content'] as String? ?? '';
-              if (c.isNotEmpty) {
-                fullContent += c;
-                _messageController.add(GatewayEvent(
-                  type: GatewayEventType.messageDelta,
-                  data: {'content': c},
-                ));
-              }
+      // Track SSE event type
+      if (chunk.startsWith('event: ')) {
+        currentEvent = chunk.substring(7).trim();
+        continue;
+      }
+      if (!chunk.startsWith('data: ')) continue;
+
+      final data = chunk.substring(6).trim();
+      if (data == '[DONE]') break;
+      if (data.isEmpty) continue;
+
+      try {
+        final json = jsonDecode(data) as Map<String, dynamic>;
+
+        // Format 1: OpenAI chat completions — choices[0].delta.content
+        final choices = json['choices'] as List?;
+        if (choices != null && choices.isNotEmpty) {
+          final delta = choices[0]['delta'] as Map<String, dynamic>?;
+          if (delta != null) {
+            final c = delta['content'] as String? ?? '';
+            if (c.isNotEmpty) {
+              fullContent += c;
+              _messageController.add(GatewayEvent(
+                type: GatewayEventType.messageDelta,
+                data: {'content': c},
+              ));
             }
           }
-        } catch (_) {}
-      }
+          continue;
+        }
+
+        // Format 2: Hermes session chat — assistant.delta event with delta field
+        if (currentEvent == 'assistant.delta') {
+          final c = json['delta'] as String? ?? json['content'] as String? ?? '';
+          if (c.isNotEmpty) {
+            fullContent += c;
+            _messageController.add(GatewayEvent(
+              type: GatewayEventType.messageDelta,
+              data: {'content': c},
+            ));
+          }
+          continue;
+        }
+
+        // Format 3: Hermes session chat — assistant.completed (final message)
+        if (currentEvent == 'assistant.completed') {
+          final finalContent = json['content'] as String? ?? '';
+          if (finalContent.isNotEmpty) {
+            fullContent = finalContent;
+          }
+          continue;
+        }
+
+        // Format 4: Hermes session chat — message.started, run.started, run.completed (metadata)
+        if (currentEvent == 'message.started' || currentEvent == 'run.started' || currentEvent == 'run.completed') {
+          continue;
+        }
+
+        // Format 5: tool.progress events
+        if (currentEvent == 'tool.progress') {
+          _messageController.add(GatewayEvent(
+            type: GatewayEventType.toolStart,
+            data: {
+              'id': json['message_id'] as String? ?? '',
+              'name': json['tool_name'] as String? ?? '',
+              'preview': json['preview'] as String? ?? '',
+            },
+          ));
+          continue;
+        }
+      } catch (_) {}
     }
 
     _messageController.add(GatewayEvent(
@@ -176,6 +223,27 @@ class GatewayService {
   }
 
   // === HTTP helpers ===
+  Future<http.StreamedResponse> _sendChatRequest(String content, {String? sessionId}) async {
+    http.Request request;
+    if (sessionId != null) {
+      // Continue existing session via session-specific endpoint
+      final uri = Uri.parse('${config.httpUrl}/api/sessions/$sessionId/chat/stream');
+      request = http.Request('POST', uri);
+      request.headers.addAll(_headers);
+      request.body = jsonEncode({'message': content, 'stream': true});
+    } else {
+      // New conversation via general chat completions
+      final uri = Uri.parse('${config.httpUrl}/v1/chat/completions');
+      request = http.Request('POST', uri);
+      request.headers.addAll(_headers);
+      request.body = jsonEncode({
+        'messages': [{'role': 'user', 'content': content}],
+        'stream': true,
+      });
+    }
+    return await _client.send(request);
+  }
+
   http.Client get _client => http.Client();
 
   Map<String, String> get _headers => {

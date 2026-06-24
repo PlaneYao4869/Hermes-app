@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,7 +6,6 @@ import '../../core/network/gateway_service.dart';
 import '../../core/network/connection_state.dart';
 import '../../core/models/gateway_config.dart';
 import '../../core/theme/app_theme.dart';
-import 'mdns_discovery.dart';
 
 class ConnectionScreen extends ConsumerStatefulWidget {
   const ConnectionScreen({super.key});
@@ -17,40 +15,6 @@ class ConnectionScreen extends ConsumerStatefulWidget {
 }
 
 class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
-  List<DiscoveredService> _discoveredServices = [];
-  bool _isScanning = false;
-  Timer? _scanTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    _startDiscovery();
-  }
-
-  @override
-  void dispose() {
-    _scanTimer?.cancel();
-    super.dispose();
-  }
-
-  void _startDiscovery() {
-    setState(() => _isScanning = true);
-    MdnsDiscovery.discover().then((services) {
-      if (mounted) {
-        setState(() {
-          _discoveredServices = services;
-          _isScanning = false;
-        });
-      }
-    });
-    // Also try direct LAN scan as fallback
-    _scanTimer = Timer(const Duration(seconds: 10), () {
-      if (mounted && _isScanning) {
-        setState(() => _isScanning = false);
-      }
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
     final connState = ref.watch(connectionStateProvider);
@@ -102,44 +66,6 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
 
           const SizedBox(height: 32),
 
-          // mDNS auto-discovery section
-          Row(
-            children: [
-              const Icon(Icons.radar, size: 20, color: Colors.grey),
-              const SizedBox(width: 8),
-              const Text('局域网自动发现', style: TextStyle(fontWeight: FontWeight.w600)),
-              const Spacer(),
-              if (_isScanning)
-                const SizedBox(
-                  width: 16, height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              IconButton(
-                icon: const Icon(Icons.refresh, size: 20),
-                onPressed: _startDiscovery,
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 8),
-
-          if (_discoveredServices.isEmpty && !_isScanning)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 16),
-              child: Text(
-                '未发现设备\n请确保手机和 PC 在同一局域网，且 Hermes Gateway 已启动',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey, fontSize: 13),
-              ),
-            )
-          else
-            ..._discoveredServices.map((service) => _DiscoveredDeviceCard(
-              service: service,
-              onTap: () => _connectToService(service),
-            )),
-
-          const SizedBox(height: 32),
-
           // Manual input (collapsible)
           ExpansionTile(
             leading: const Icon(Icons.edit, color: Colors.grey),
@@ -163,19 +89,11 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
     );
   }
 
-  void _connectToService(DiscoveredService service) {
-    final config = GatewayConfig(
-      host: service.host,
-      port: service.port,
-    );
-    _connect(config);
-  }
-
   void _connect(GatewayConfig config) {
     // Just set config — the provider auto-creates service and connects
     ref.read(gatewayConfigProvider.notifier).configure(config);
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('正在连接 \${config.host}:\${config.port}...')),
+      SnackBar(content: Text('正在连接 ${config.host}:${config.port}...')),
     );
 
     // Listen for connection result
@@ -193,7 +111,7 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
         sub.close();
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('连接失败: \${next.errorMessage ?? "未知错误"}'), backgroundColor: Colors.red),
+            SnackBar(content: Text('连接失败: ${next.errorMessage ?? "未知错误"}'), backgroundColor: Colors.red),
           );
         }
       }
@@ -314,33 +232,6 @@ class _QrScanPageState extends State<_QrScanPage> {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-// === Discovered Device Card ===
-class _DiscoveredDeviceCard extends StatelessWidget {
-  final DiscoveredService service;
-  final VoidCallback onTap;
-
-  const _DiscoveredDeviceCard({required this.service, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: AppTheme.success.withOpacity(0.2),
-          child: const Icon(Icons.computer, color: AppTheme.success, size: 20),
-        ),
-        title: Text(service.name, style: const TextStyle(fontWeight: FontWeight.w500)),
-        subtitle: Text('${service.host}:${service.port}', style: const TextStyle(fontSize: 12)),
-        trailing: FilledButton.tonal(
-          onPressed: onTap,
-          child: const Text('连接'),
-        ),
       ),
     );
   }

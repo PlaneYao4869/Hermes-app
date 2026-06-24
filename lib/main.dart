@@ -6,7 +6,6 @@ import 'features/chat/chat_screen.dart';
 import 'features/sessions/sessions_screen.dart';
 import 'features/settings/settings_screen.dart';
 import 'features/git_browser/git_repos_screen.dart';
-import 'features/agent_orchestrator/orchestrator_screen.dart';
 import 'core/network/gateway_service.dart';
 
 void main() {
@@ -45,7 +44,6 @@ class _MainShellState extends State<MainShell> {
     ChatScreen(),
     SessionsScreen(),
     GitReposScreen(),
-    OrchestratorScreen(),
     SettingsScreen(),
   ];
 
@@ -74,11 +72,6 @@ class _MainShellState extends State<MainShell> {
             icon: Icon(Icons.folder_open_outlined),
             selectedIcon: Icon(Icons.folder),
             label: '代码',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.hub_outlined),
-            selectedIcon: Icon(Icons.hub),
-            label: '编排',
           ),
           NavigationDestination(
             icon: Icon(Icons.settings_outlined),

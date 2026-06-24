@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../core/network/gateway_service.dart';
 import '../../core/network/connection_state.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/theme/theme_provider.dart';
 import '../../core/models/gateway_config.dart';
 import 'connection_screen.dart';
 
@@ -78,9 +80,11 @@ class SettingsScreen extends ConsumerWidget {
                   leading: const Icon(Icons.dark_mode),
                   title: const Text('深色模式'),
                   trailing: Switch(
-                    value: Theme.of(context).brightness == Brightness.dark,
+                    value: ref.watch(themeModeProvider) == ThemeMode.dark,
                     onChanged: (v) {
-                      // Toggle theme
+                      ref.read(themeModeProvider.notifier).setMode(
+                        v ? ThemeMode.dark : ThemeMode.light,
+                      );
                     },
                   ),
                 ),
@@ -96,17 +100,22 @@ class SettingsScreen extends ConsumerWidget {
             margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
             child: Column(
               children: [
-                const ListTile(
+                ListTile(
                   leading: Icon(Icons.info_outline),
                   title: Text('Hermes Mobile'),
                   subtitle: Text('v1.0.0 · AI Agent 远程控制'),
+                  onTap: () {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Hermes Mobile v1.0.0 · AI Agent 远程控制')),
+                    );
+                  },
                 ),
                 ListTile(
                   leading: const Icon(Icons.code),
                   title: const Text('GitHub'),
                   subtitle: const Text('查看源码'),
                   onTap: () {
-                    // Launch URL
+                    launchUrl(Uri.parse('https://github.com/PlaneYao4869/Hermes-app'));
                   },
                 ),
               ],

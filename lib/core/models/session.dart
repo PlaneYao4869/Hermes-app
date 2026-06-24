@@ -15,14 +15,22 @@ class SessionInfo {
     this.messageCount = 0,
   });
 
+  static int _toInt(dynamic v, [int fallback = 0]) {
+    if (v is int) return v;
+    if (v is String) return int.tryParse(v) ?? fallback;
+    return fallback;
+  }
+
+  static String _str(dynamic v) => v?.toString() ?? '';
+
   factory SessionInfo.fromJson(Map<String, dynamic> json) {
     return SessionInfo(
-      id: json['id'] as String? ?? '',
+      id: _str(json['id']),
       title: json['title'] as String?,
-      platform: json['platform'] as String? ?? 'unknown',
-      createdAt: DateTime.tryParse(json['created_at'] as String? ?? '') ?? DateTime.now(),
-      updatedAt: DateTime.tryParse(json['updated_at'] as String? ?? '') ?? DateTime.now(),
-      messageCount: json['message_count'] as int? ?? 0,
+      platform: _str(json['source'] ?? json['platform'] ?? 'api'),
+      createdAt: DateTime.tryParse(_str(json['started_at'] ?? json['created_at'])) ?? DateTime.now(),
+      updatedAt: DateTime.tryParse(_str(json['last_active'] ?? json['updated_at'])) ?? DateTime.now(),
+      messageCount: _toInt(json['message_count']),
     );
   }
 }

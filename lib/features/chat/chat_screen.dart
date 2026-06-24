@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/network/gateway_service.dart';
@@ -8,12 +7,12 @@ import '../../core/models/approval.dart';
 import '../../core/theme/app_theme.dart';
 import 'widgets/message_bubble.dart';
 import 'widgets/approval_sheet.dart';
-import 'widgets/voice_input_button.dart';
 import 'chat_controller.dart';
 import '../settings/connection_screen.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
-  const ChatScreen({super.key});
+  final String? sessionId;
+  const ChatScreen({super.key, this.sessionId});
 
   @override
   ConsumerState<ChatScreen> createState() => _ChatScreenState();
@@ -21,27 +20,23 @@ class ChatScreen extends ConsumerStatefulWidget {
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _inputController = TextEditingController();
-  final _scrollController = ScrollController();
   final _focusNode = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.sessionId != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        ref.read(chatControllerProvider.notifier).loadSession(widget.sessionId!);
+      });
+    }
+  }
 
   @override
   void dispose() {
     _inputController.dispose();
-    _scrollController.dispose();
     _focusNode.dispose();
     super.dispose();
-  }
-
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
-    });
   }
 
   void _sendMessage() {
@@ -50,7 +45,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     ref.read(chatControllerProvider.notifier).sendMessage(text);
     _inputController.clear();
     _focusNode.requestFocus();
-    _scrollToBottom();
   }
 
   @override
@@ -58,13 +52,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final messages = ref.watch(chatMessagesProvider);
     final connState = ref.watch(connectionStateProvider);
     final pendingApproval = ref.watch(pendingApprovalProvider);
-
-    // Listen for new messages to auto-scroll
-    ref.listen(chatMessagesProvider, (prev, next) {
-      if (prev != null && next.length > prev.length) {
-        _scrollToBottom();
-      }
-    });
+    final isSending = ref.watch(isSendingProvider);
 
     // Listen for approval requests
     ref.listen(pendingApprovalProvider, (prev, next) {
@@ -108,14 +96,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         children: [
           // Messages list
           Expanded(
-            child: messages.isEmpty
-                ? _buildEmptyState()
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    itemCount: messages.length,
-                    itemBuilder: (context, index) => MessageBubble(message: messages[index]),
-                  ),
+            child: isSending && messages.isEmpty
+                ? const Center(child: CircularProgressIndicator())
+                : messages.isEmpty
+                    ? _buildEmptyState()
+                    : ListView.builder(
+                        reverse: true,
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        itemCount: messages.length,
+                        itemBuilder: (context, index) => MessageBubble(
+                          message: messages[messages.length - 1 - index],
+                        ),
+                      ),
           ),
           // Input area
           _buildInputArea(),
@@ -147,27 +139,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   Widget _buildInputArea() {
     return Container(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainer,
         border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
       ),
       child: SafeArea(
+        bottom: true,
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            VoiceInputButton(
-              onResult: (text) {
-                _inputController.text = text;
-                _inputController.selection = TextSelection.fromPosition(
-                  TextPosition(offset: text.length),
-                );
-              },
-            ),
-            const SizedBox(width: 8),
             Expanded(
               child: ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 120),
+                constraints: const BoxConstraints(maxHeight: 100),
                 child: TextField(
                   controller: _inputController,
                   focusNode: _focusNode,
@@ -175,16 +159,21 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                   textInputAction: TextInputAction.newline,
                   decoration: const InputDecoration(
                     hintText: '输入消息...',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     border: OutlineInputBorder(borderSide: BorderSide.none),
                   ),
                   onSubmitted: (_) => _sendMessage(),
                 ),
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 4),
             IconButton.filled(
               onPressed: _sendMessage,
               icon: const Icon(Icons.send_rounded),
+              iconSize: 20,
+              padding: const EdgeInsets.all(8),
+              constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
             ),
           ],
         ),

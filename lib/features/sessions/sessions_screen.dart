@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../../core/network/gateway_service.dart';
 import '../../core/models/session.dart';
 import '../../core/theme/app_theme.dart';
+import '../chat/chat_screen.dart';
 
 final sessionsProvider = FutureProvider<List<SessionInfo>>((ref) async {
   final gateway = ref.watch(gatewayServiceProvider);
@@ -85,7 +86,12 @@ class _SessionTile extends StatelessWidget {
         ),
         trailing: const Icon(Icons.chevron_right, color: Colors.grey),
         onTap: () {
-          // TODO: Navigate to session detail and load messages
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ChatScreen(sessionId: session.id),
+            ),
+          );
         },
       ),
     );

@@ -18,6 +18,8 @@ final currentSessionIdProvider = StateProvider<String?>((ref) => null);
 // Is sending
 final isSendingProvider = StateProvider<bool>((ref) => false);
 
+String _str(dynamic v) => v?.toString() ?? '';
+
 class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
   final Ref ref;
   StreamSubscription? _eventSub;
@@ -25,6 +27,28 @@ class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
 
   ChatMessagesNotifier(this.ref) : super([]) {
     _listenToGateway();
+    _autoLoadLatestSession();
+  }
+
+  Future<void> _autoLoadLatestSession() async {
+    await Future.delayed(const Duration(milliseconds: 500));
+    final gateway = ref.read(gatewayServiceProvider);
+    if (gateway == null) return;
+    try {
+      final sessions = await gateway.getSessions();
+      if (sessions.isNotEmpty) {
+        ref.read(currentSessionIdProvider.notifier).state = sessions.first.id;
+        final messages = await gateway.getSessionMessages(sessions.first.id);
+        state = messages;
+      }
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    _eventSub?.cancel();
+    _approvalSub?.cancel();
+    super.dispose();
   }
 
   void _listenToGateway() {
@@ -64,7 +88,7 @@ class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
   String? _streamingMessageId;
 
   void _handleMessageDelta(Map<String, dynamic> data) {
-    final content = data['content'] as String? ?? '';
+    final content = _str(data['content']);
     if (content.isEmpty) return;
 
     if (_streamingMessageId == null) {
@@ -89,7 +113,7 @@ class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
     if (_streamingMessageId != null) {
       final idx = state.indexWhere((m) => m.id == _streamingMessageId);
       if (idx >= 0) {
-        final finalContent = data['content'] as String? ?? state[idx].content;
+        final finalContent = _str(data['content']).isEmpty ? state[idx].content : _str(data['content']);
         state = [...state.sublist(0, idx),
           state[idx].copyWith(content: finalContent, isStreaming: false),
           ...state.sublist(idx + 1)];
@@ -100,9 +124,11 @@ class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
 
   void _handleToolStart(Map<String, dynamic> data) {
     final toolCall = ToolCall(
-      id: data['id'] as String? ?? 'tool_${DateTime.now().millisecondsSinceEpoch}',
-      name: data['name'] as String? ?? 'unknown',
-      arguments: data['arguments'] as Map<String, dynamic>? ?? {},
+      id: _str(data['id']).isEmpty ? 'tool_${DateTime.now().millisecondsSinceEpoch}' : _str(data['id']),
+      name: _str(data['name']).isEmpty ? 'unknown' : _str(data['name']),
+      arguments: data['arguments'] is Map
+          ? Map<String, dynamic>.from(data['arguments'] as Map)
+          : <String, dynamic>{},
       status: 'running',
     );
     state = [...state, ChatMessage(
@@ -115,19 +141,19 @@ class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
   }
 
   void _handleToolComplete(Map<String, dynamic> data) {
-    final toolId = data['id'] as String?;
-    if (toolId == null) return;
+    final toolId = _str(data['id']);
+    if (toolId.isEmpty) return;
     final idx = state.indexWhere((m) => m.toolCalls?.any((t) => t.id == toolId) ?? false);
     if (idx >= 0) {
       final oldCall = state[idx].toolCalls!.firstWhere((t) => t.id == toolId);
       final updatedCall = ToolCall(
         id: oldCall.id, name: oldCall.name,
         arguments: oldCall.arguments,
-        result: data['result'] as String?,
+        result: _str(data['result']),
         status: 'complete',
       );
       state = [...state.sublist(0, idx),
-        state[idx].copyWith(toolCalls: [updatedCall], content: data['summary'] as String? ?? state[idx].content),
+        state[idx].copyWith(toolCalls: [updatedCall], content: _str(data['summary']).isEmpty ? state[idx].content : _str(data['summary'])),
         ...state.sublist(idx + 1)];
     }
   }
@@ -136,7 +162,7 @@ class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
     state = [...state, ChatMessage(
       id: 'error_${DateTime.now().millisecondsSinceEpoch}',
       role: MessageRole.system,
-      content: '错误: ${data['message'] as String? ?? "未知错误"}',
+      content: '错误: ${_str(data['message']).isEmpty ? "未知错误" : _str(data['message'])}',
       timestamp: DateTime.now(),
     )];
   }
@@ -190,5 +216,28 @@ class ChatController extends StateNotifier<void> {
   void newSession() {
     ref.read(chatMessagesProvider.notifier).state = [];
     ref.read(currentSessionIdProvider.notifier).state = null;
+  }
+
+  Future<void> loadSession(String sessionId) async {
+    final gateway = ref.read(gatewayServiceProvider);
+    if (gateway == null) return;
+
+    ref.read(currentSessionIdProvider.notifier).state = sessionId;
+    ref.read(isSendingProvider.notifier).state = true;
+    try {
+      final messages = await gateway.getSessionMessages(sessionId);
+      ref.read(chatMessagesProvider.notifier).state = messages;
+    } catch (e) {
+      ref.read(chatMessagesProvider.notifier).state = [
+        ChatMessage(
+          id: 'error_${DateTime.now().millisecondsSinceEpoch}',
+          role: MessageRole.system,
+          content: '加载会话消息失败: $e',
+          timestamp: DateTime.now(),
+        ),
+      ];
+    } finally {
+      ref.read(isSendingProvider.notifier).state = false;
+    }
   }
 }
