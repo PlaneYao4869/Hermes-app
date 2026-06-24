@@ -28,8 +28,6 @@ ios/Flutter/Flutter.podspec
 
 # Environment
 .env
-*.lock
-pubspec.lock
 
 # OS
 .DS_Store
