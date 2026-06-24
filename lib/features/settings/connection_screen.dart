@@ -171,15 +171,40 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
     _connect(config);
   }
 
-  void _connect(GatewayConfig config) {
+  Future<void> _connect(GatewayConfig config) async {
     ref.read(gatewayConfigProvider.notifier).configure(config);
-    // Gateway service is auto-created by the provider
-    Future.microtask(() {
-      ref.read(gatewayServiceProvider)?.connect();
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('正在连接 ${config.host}:${config.port}...')),
-    );
+
+    // Wait for provider to rebuild with new config
+    await Future.delayed(const Duration(milliseconds: 100));
+
+    final gateway = ref.read(gatewayServiceProvider);
+    if (gateway == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('连接初始化失败')),
+        );
+      }
+      return;
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('正在连接 \${config.host}:\${config.port}...')),
+      );
+    }
+
+    final success = await gateway.connect();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(success ? '连接成功!' : '连接失败，请检查地址和网络'),
+          backgroundColor: success ? null : Colors.red,
+        ),
+      );
+      if (success) {
+        Navigator.pop(context);
+      }
+    }
   }
 }
 

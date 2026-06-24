@@ -15,11 +15,13 @@ final pendingApprovalProvider = StateProvider<ApprovalRequest?>((ref) => null);
 // Current session
 final currentSessionIdProvider = StateProvider<String?>((ref) => null);
 
+// Is sending
+final isSendingProvider = StateProvider<bool>((ref) => false);
+
 class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
   final Ref ref;
   StreamSubscription? _eventSub;
   StreamSubscription? _approvalSub;
-  String? _streamingMessageId;
 
   ChatMessagesNotifier(this.ref) : super([]) {
     _listenToGateway();
@@ -59,8 +61,12 @@ class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
     });
   }
 
+  String? _streamingMessageId;
+
   void _handleMessageDelta(Map<String, dynamic> data) {
-    final content = data['content'] as String? ?? data['delta'] as String? ?? '';
+    final content = data['content'] as String? ?? '';
+    if (content.isEmpty) return;
+
     if (_streamingMessageId == null) {
       _streamingMessageId = 'stream_${DateTime.now().millisecondsSinceEpoch}';
       state = [...state, ChatMessage(
@@ -84,7 +90,9 @@ class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
       final idx = state.indexWhere((m) => m.id == _streamingMessageId);
       if (idx >= 0) {
         final finalContent = data['content'] as String? ?? state[idx].content;
-        state = [...state.sublist(0, idx), state[idx].copyWith(content: finalContent, isStreaming: false), ...state.sublist(idx + 1)];
+        state = [...state.sublist(0, idx),
+          state[idx].copyWith(content: finalContent, isStreaming: false),
+          ...state.sublist(idx + 1)];
       }
       _streamingMessageId = null;
     }
@@ -143,7 +151,10 @@ class ChatController extends StateNotifier<void> {
   final Ref ref;
   ChatController(this.ref) : super(null);
 
-  void sendMessage(String content) {
+  Future<void> sendMessage(String content) async {
+    final gateway = ref.read(gatewayServiceProvider);
+    if (gateway == null) return;
+
     // Add user message to state
     final userMsg = ChatMessage(
       id: 'user_${DateTime.now().millisecondsSinceEpoch}',
@@ -156,11 +167,23 @@ class ChatController extends StateNotifier<void> {
       userMsg,
     ];
 
-    // Send via gateway
-    final gateway = ref.read(gatewayServiceProvider);
-    if (gateway != null) {
+    // Send via REST API (streaming)
+    ref.read(isSendingProvider.notifier).state = true;
+    try {
       final sessionId = ref.read(currentSessionIdProvider);
-      gateway.sendChatMessage(content, sessionId: sessionId);
+      await gateway.sendChat(content, sessionId: sessionId);
+    } catch (e) {
+      ref.read(chatMessagesProvider.notifier).state = [
+        ...ref.read(chatMessagesProvider),
+        ChatMessage(
+          id: 'error_${DateTime.now().millisecondsSinceEpoch}',
+          role: MessageRole.system,
+          content: '发送失败: $e',
+          timestamp: DateTime.now(),
+        ),
+      ];
+    } finally {
+      ref.read(isSendingProvider.notifier).state = false;
     }
   }
 
