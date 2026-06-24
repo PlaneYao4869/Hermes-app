@@ -33,6 +33,12 @@ dependencies:
   speech_to_text: ^7.4.0
   permission_handler: ^11.3.1
 
+  # QR Code scanning
+  mobile_scanner: ^6.0.2
+
+  # Network discovery
+  nsd: ^3.0.0
+
   # Utilities
   intl: ^0.19.0
   uuid: ^4.4.0

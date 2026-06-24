@@ -4,7 +4,7 @@ import '../../core/network/gateway_service.dart';
 import '../../core/network/connection_state.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/models/gateway_config.dart';
-import '../chat/chat_screen.dart' show ConnectionDialog;
+import 'connection_screen.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -118,7 +118,7 @@ class SettingsScreen extends ConsumerWidget {
   }
 
   void _showConnectionDialog(BuildContext context, WidgetRef ref) {
-    showDialog(context: context, builder: (_) => ConnectionDialog());
+    Navigator.push(context, MaterialPageRoute(builder: (_) => const ConnectionScreen()));
   }
 }
 

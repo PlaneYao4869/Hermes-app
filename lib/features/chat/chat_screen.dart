@@ -11,6 +11,7 @@ import 'widgets/message_bubble.dart';
 import 'widgets/approval_sheet.dart';
 import 'widgets/voice_input_button.dart';
 import 'chat_controller.dart';
+import '../settings/connection_screen.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({super.key});
@@ -201,7 +202,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   void _showConnectionDialog() {
-    showDialog(context: context, builder: (_) => ConnectionDialog());
+    Navigator.push(context, MaterialPageRoute(builder: (_) => ConnectionScreen()));
   }
 }
 
