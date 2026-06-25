@@ -17,6 +17,8 @@ class WSProxy:
         self.gateway_url = gateway_url
         self.api_key = api_key
         self.session = None
+        # Per-connection state: ws id -> {task, session_id, after_id, ...}
+        self._subscriptions: dict[int, dict] = {}
 
     async def get_session(self):
         if self.session is None or self.session.closed:
@@ -26,6 +28,8 @@ class WSProxy:
     async def handle_ws(self, request):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
+        ws_id = id(ws)
+        self._subscriptions[ws_id] = {"task": None, "session_id": None, "after_id": 0}
         await ws.send_json({"type": "ready"})
 
         try:
@@ -38,6 +42,10 @@ class WSProxy:
                             content = data.get("content", "")
                             if content:
                                 await self._handle_chat(ws, sid, content)
+                        elif data.get("type") == "subscribe":
+                            await self._handle_subscribe(ws, ws_id, data)
+                        elif data.get("type") == "unsubscribe":
+                            await self._handle_unsubscribe(ws, ws_id)
                         elif data.get("type") == "ping":
                             await ws.send_json({"type": "pong"})
                     except json.JSONDecodeError:
@@ -48,8 +56,98 @@ class WSProxy:
                     break
         except Exception:
             pass
+        finally:
+            # Clean up any running polling task when the WS closes
+            await self._cancel_subscription(ws_id)
+            self._subscriptions.pop(ws_id, None)
 
         return ws
+
+    async def _handle_subscribe(self, ws, ws_id, data):
+        """Start polling for new messages on a session."""
+        session_id = data.get("session_id")
+        after_id = data.get("after_id", 0)
+
+        if not session_id:
+            await ws.send_json({"type": "error", "message": "subscribe requires session_id"})
+            return
+
+        # Cancel any existing subscription first
+        await self._cancel_subscription(ws_id)
+
+        state = self._subscriptions[ws_id]
+        state["session_id"] = session_id
+        state["after_id"] = int(after_id)
+        state["task"] = asyncio.create_task(
+            self._poll_loop(ws, ws_id, session_id, state["after_id"])
+        )
+
+        await ws.send_json({
+            "type": "subscribed",
+            "session_id": session_id,
+            "after_id": state["after_id"],
+        })
+
+    async def _handle_unsubscribe(self, ws, ws_id):
+        """Stop the polling loop for this connection."""
+        await self._cancel_subscription(ws_id)
+        await ws.send_json({"type": "unsubscribed"})
+
+    async def _cancel_subscription(self, ws_id):
+        """Cancel the running poll task for a connection, if any."""
+        state = self._subscriptions.get(ws_id)
+        if state and state.get("task") and not state["task"].done():
+            state["task"].cancel()
+            try:
+                await state["task"]
+            except asyncio.CancelledError:
+                pass
+            state["task"] = None
+
+    async def _poll_loop(self, ws, ws_id, session_id, start_after_id):
+        """Poll the Gateway every 2 seconds for messages newer than after_id."""
+        after_id = start_after_id
+        session = await self.get_session()
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        url_base = f"{self.gateway_url}/api/sessions/{session_id}/messages"
+
+        try:
+            while not ws.closed:
+                try:
+                    params = {"after_id": after_id}
+                    async with session.get(
+                        url_base, params=params, headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status == 200:
+                            body = await resp.json()
+                            messages = body.get("data", [])
+                            for msg in messages:
+                                await ws.send_json({
+                                    "type": "message",
+                                    "message": msg,
+                                })
+                                msg_id = int(msg.get("id", 0))
+                                if msg_id > after_id:
+                                    after_id = msg_id
+                            # Persist the latest after_id so reconnects could resume
+                            state = self._subscriptions.get(ws_id)
+                            if state:
+                                state["after_id"] = after_id
+                        else:
+                            # Non-fatal; log and retry next cycle
+                            pass
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    # Network hiccup — keep trying
+                    pass
+                except Exception:
+                    pass
+
+                await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            return
 
     async def _handle_chat(self, ws, session_id, content):
         session = await self.get_session()

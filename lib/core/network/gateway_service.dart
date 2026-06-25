@@ -56,8 +56,21 @@ class GatewayService {
   WebSocketChannel? _ws;
   bool _wsReady = false;
 
+  // Subscription state for real-time message sync
+  String? _subscribedSessionId;
+  int? _lastMessageId;
+
   Stream<GatewayEvent> get events => _messageController.stream;
   Stream<ApprovalRequest> get approvals => _approvalController.stream;
+
+  /// Whether a WS subscription is currently active.
+  bool get isSubscribed => _subscribedSessionId != null;
+
+  /// The session ID currently subscribed via WS, if any.
+  String? get subscribedSessionId => _subscribedSessionId;
+
+  /// The last known message ID from the subscribed session.
+  int? get lastMessageId => _lastMessageId;
 
   GatewayService(this.config, this.ref);
 
@@ -88,6 +101,35 @@ class GatewayService {
             _messageController.add(GatewayEvent(type: GatewayEventType.messageDelta, data: {'content': msg['content'] as String? ?? ''}));
           } else if (type == 'done') {
             _messageController.add(GatewayEvent(type: GatewayEventType.messageComplete, data: {'content': msg['content'] as String? ?? ''}));
+          } else if (type == 'message') {
+            // Incoming message from WS subscription (e.g. from CLI or other sources)
+            final message = msg['message'] as Map<String, dynamic>?;
+            if (message != null) {
+              final msgId = message['id'];
+              if (msgId is int) {
+                _lastMessageId = msgId;
+              } else if (msgId is String) {
+                _lastMessageId = int.tryParse(msgId);
+              }
+              final role = message['role'] as String? ?? 'assistant';
+              final content = message['content'] as String? ?? '';
+              debugPrint('[Gateway] WS subscribed message: role=$role, id=$_lastMessageId');
+              // Emit as a delta for incremental display, then complete
+              _messageController.add(GatewayEvent(
+                type: GatewayEventType.messageDelta,
+                data: {'content': content, 'role': role, 'message_id': msgId},
+              ));
+              _messageController.add(GatewayEvent(
+                type: GatewayEventType.messageComplete,
+                data: {'content': content, 'role': role, 'message_id': msgId},
+              ));
+            }
+          } else if (type == 'subscribed') {
+            _subscribedSessionId = msg['session_id'] as String?;
+            debugPrint('[Gateway] WS subscribed to session: $_subscribedSessionId');
+          } else if (type == 'unsubscribed') {
+            _subscribedSessionId = null;
+            debugPrint('[Gateway] WS unsubscribed from session');
           } else if (type == 'error') {
             _messageController.add(GatewayEvent(type: GatewayEventType.error, data: {'message': msg['message'] as String? ?? 'Error'}));
           } else if (type == 'pong') {
@@ -102,6 +144,7 @@ class GatewayService {
         onDone: () {
           debugPrint('[Gateway] WS closed');
           _wsReady = false;
+          _subscribedSessionId = null;
         },
       );
 
@@ -138,6 +181,7 @@ class GatewayService {
     _ws?.sink.close();
     _ws = null;
     _wsReady = false;
+    _subscribedSessionId = null;
     ref.read(connectionStateProvider.notifier).setDisconnected();
   }
 
@@ -145,9 +189,54 @@ class GatewayService {
   Future<void> sendChat(String content, {String? sessionId}) async {
     if (_ws != null && _wsReady) {
       _ws!.sink.add(jsonEncode({'type': 'chat', 'session_id': sessionId, 'content': content}));
+      // After sending, subscribe to the session so we receive messages from other sources
+      if (sessionId != null) {
+        subscribeToSession(sessionId, afterId: _lastMessageId);
+      }
       return;
     }
     await _sendChatHttp(content, sessionId: sessionId);
+  }
+
+  // === WS subscription for real-time message sync ===
+
+  /// Subscribe to receive new messages for [sessionId] via WS.
+  /// If [afterId] is provided, only messages with ID > afterId are sent.
+  /// This allows real-time sync when other clients (e.g. CLI) send messages.
+  void subscribeToSession(String sessionId, {int? afterId}) {
+    if (_ws == null || !_wsReady) {
+      debugPrint('[Gateway] Cannot subscribe: WS not connected');
+      return;
+    }
+    // Unsubscribe from previous session if different
+    if (_subscribedSessionId != null && _subscribedSessionId != sessionId) {
+      unsubscribeFromSession();
+    }
+    final payload = <String, dynamic>{
+      'type': 'subscribe',
+      'session_id': sessionId,
+    };
+    if (afterId != null) {
+      payload['after_id'] = afterId;
+    }
+    debugPrint('[Gateway] Subscribing to session $sessionId (afterId=$afterId)');
+    _ws!.sink.add(jsonEncode(payload));
+  }
+
+  /// Unsubscribe from the current session subscription.
+  void unsubscribeFromSession() {
+    if (_ws == null || !_wsReady) return;
+    if (_subscribedSessionId == null) return;
+    debugPrint('[Gateway] Unsubscribing from session $_subscribedSessionId');
+    _ws!.sink.add(jsonEncode({'type': 'unsubscribe'}));
+    _subscribedSessionId = null;
+  }
+
+  /// Update the last known message ID (call this when loading messages).
+  void setLastMessageId(int id) {
+    if (_lastMessageId == null || id > _lastMessageId!) {
+      _lastMessageId = id;
+    }
   }
 
   // === HTTP REST API ===
@@ -275,6 +364,7 @@ class GatewayService {
 
   void dispose() {
     _ws?.sink.close();
+    _subscribedSessionId = null;
     _messageController.close();
     _approvalController.close();
   }
