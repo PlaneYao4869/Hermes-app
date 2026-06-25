@@ -32,7 +32,7 @@ class SettingsScreen extends ConsumerWidget {
                     color: connState.isConnected ? AppTheme.success : AppTheme.error,
                   ),
                   title: Text(connState.displayText),
-                  subtitle: config != null ? Text('${config.host}:${config.port}') : const Text('未配置'),
+                  subtitle: config != null ? Text('${config.host}:${config.httpPort}') : const Text('未配置'),
                   trailing: const Icon(Icons.edit),
                   onTap: () => _showConnectionDialog(context, ref),
                 ),

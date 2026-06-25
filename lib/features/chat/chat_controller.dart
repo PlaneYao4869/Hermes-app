@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/network/gateway_service.dart';
 import '../../core/models/message.dart';
@@ -31,17 +32,28 @@ class ChatMessagesNotifier extends StateNotifier<List<ChatMessage>> {
   }
 
   Future<void> _autoLoadLatestSession() async {
-    await Future.delayed(const Duration(milliseconds: 500));
-    final gateway = ref.read(gatewayServiceProvider);
-    if (gateway == null) return;
-    try {
-      final sessions = await gateway.getSessions();
-      if (sessions.isNotEmpty) {
-        ref.read(currentSessionIdProvider.notifier).state = sessions.first.id;
-        final messages = await gateway.getSessionMessages(sessions.first.id);
-        state = messages;
+    // Wait for gateway to be ready (up to 5 seconds)
+    for (int i = 0; i < 25; i++) {
+      await Future.delayed(const Duration(milliseconds: 200));
+      final gateway = ref.read(gatewayServiceProvider);
+      final connState = ref.read(connectionStateProvider);
+      if (gateway != null && connState.isConnected) {
+        try {
+          final sessions = await gateway.getSessions();
+          if (sessions.isNotEmpty) {
+            ref.read(currentSessionIdProvider.notifier).state = sessions.first.id;
+            final messages = await gateway.getSessionMessages(sessions.first.id);
+            state = messages;
+            debugPrint('[Chat] Auto-loaded session: ${sessions.first.id} with ${messages.length} messages');
+          }
+        } catch (e) {
+          debugPrint('[Chat] Failed to auto-load session: $e');
+          // Don't treat this as fatal — user can send a new message
+        }
+        return;
       }
-    } catch (_) {}
+    }
+    debugPrint('[Chat] Gateway not ready after 5s, skipping auto-load');
   }
 
   @override
@@ -225,7 +237,9 @@ class ChatController extends StateNotifier<void> {
     ref.read(currentSessionIdProvider.notifier).state = sessionId;
     ref.read(isSendingProvider.notifier).state = true;
     try {
-      final messages = await gateway.getSessionMessages(sessionId);
+      // Load messages in batches (50 per batch, 30s timeout per batch)
+      // This handles large sessions over slow connections like Tailscale.
+      final messages = await gateway.getSessionMessagesAll(sessionId, batchSize: 50);
       ref.read(chatMessagesProvider.notifier).state = messages;
     } catch (e) {
       ref.read(chatMessagesProvider.notifier).state = [

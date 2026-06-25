@@ -97,7 +97,7 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
     // Just set config — the provider auto-creates service and connects
     ref.read(gatewayConfigProvider.notifier).configure(config);
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('正在连接 ${config.host}:${config.port}...')),
+      SnackBar(content: Text('正在连接 ${config.host}:${config.httpPort}...')),
     );
 
     // Listen for connection result
@@ -152,36 +152,46 @@ class _QrScanPageState extends State<_QrScanPage> {
   }
 
   GatewayConfig? _parseQrData(String data) {
-    // Try JSON format: {"ws":"ws://host:port/api/ws","token":"...","name":"..."}
+    // Try JSON format: {"ws":"ws://host:8643/ws","token":"...","name":"..."}
     try {
       final json = jsonDecode(data) as Map<String, dynamic>;
       final wsUrl = json['ws'] as String? ?? json['url'] as String?;
       if (wsUrl != null) {
         final uri = Uri.parse(wsUrl);
+        // WS URL port is the WebSocket port (8643); HTTP is always 8642
+        final isHttps = uri.scheme == 'wss' || uri.scheme == 'https';
         return GatewayConfig(
           host: uri.host,
-          port: uri.port,
+          httpPort: isHttps ? (uri.hasPort ? uri.port : 443) : 8642,
+          wsPort: uri.hasPort ? uri.port : (isHttps ? 443 : 8643),
           token: json['token'] as String?,
+          useTls: isHttps,
         );
       }
-      // Also try: {"host":"...","port":8642,"token":"..."}
+      // Also try: {"host":"...","httpPort":8642,"token":"..."}
       final host = json['host'] as String?;
       if (host != null) {
         return GatewayConfig(
           host: host,
-          port: json['port'] as int? ?? 8642,
+          httpPort: json['httpPort'] as int? ?? json['port'] as int? ?? 8642,
+          wsPort: json['wsPort'] as int? ?? 8643,
           token: json['token'] as String?,
+          useTls: json['tls'] as bool? ?? json['useTls'] as bool? ?? false,
         );
       }
     } catch (_) {}
 
-    // Try plain URL: ws://host:port/api/ws or http://host:port
+    // Try plain URL: ws://host:port/ws or http://host:port
     if (data.startsWith('ws://') || data.startsWith('wss://') ||
         data.startsWith('http://') || data.startsWith('https://')) {
       final uri = Uri.parse(data);
+      final isHttps = uri.scheme == 'wss' || uri.scheme == 'https';
+      final isWs = uri.scheme == 'ws' || uri.scheme == 'wss';
       return GatewayConfig(
         host: uri.host,
-        port: uri.port,
+        httpPort: isWs ? 8642 : (uri.hasPort ? uri.port : (isHttps ? 443 : 80)),
+        wsPort: isWs ? (uri.hasPort ? uri.port : (isHttps ? 443 : 8643)) : 8643,
+        useTls: isHttps,
       );
     }
 
@@ -191,7 +201,7 @@ class _QrScanPageState extends State<_QrScanPage> {
       if (parts.length == 2) {
         final port = int.tryParse(parts[1]);
         if (port != null) {
-          return GatewayConfig(host: parts[0], port: port);
+          return GatewayConfig(host: parts[0], httpPort: port, wsPort: 8643);
         }
       }
     }
@@ -287,7 +297,7 @@ class _ManualConnectFormState extends State<_ManualConnectForm> {
                 final savedToken = _savedToken;
                 final config = GatewayConfig(
                   host: _hostController.text.trim(),
-                  port: int.tryParse(_portController.text) ?? 8642,
+                  httpPort: int.tryParse(_portController.text) ?? 8642,
                   token: savedToken,
                 );
                 widget.onConnect(config);

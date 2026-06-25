@@ -66,7 +66,7 @@ class GatewayService {
 
     // Try WebSocket on port 8643
     try {
-      final wsUrl = 'ws://${config.host}:8643/ws';
+      final wsUrl = config.wsUrl;
       debugPrint('[Gateway] Connecting WS: $wsUrl');
 
       _ws = WebSocketChannel.connect(Uri.parse(wsUrl));
@@ -159,10 +159,41 @@ class GatewayService {
     return list.map((s) => SessionInfo.fromJson(s as Map<String, dynamic>)).toList();
   }
 
-  Future<List<ChatMessage>> getSessionMessages(String sessionId) async {
-    final response = await _get('/api/sessions/$sessionId/messages');
+  Future<List<ChatMessage>> getSessionMessages(String sessionId, {int? offset, int? limit}) async {
+    final queryParams = <String, String>{};
+    if (offset != null) queryParams['offset'] = offset.toString();
+    if (limit != null) queryParams['limit'] = limit.toString();
+    final response = await _get(
+      '/api/sessions/$sessionId/messages',
+      timeoutSeconds: 30,
+      queryParams: queryParams.isNotEmpty ? queryParams : null,
+    );
     final list = response['data'] as List? ?? [];
     return list.map((m) => ChatMessage.fromJson(m as Map<String, dynamic>)).toList();
+  }
+
+  Future<List<ChatMessage>> getSessionMessagesAll(String sessionId, {int batchSize = 50}) async {
+    final allMessages = <ChatMessage>[];
+    int offset = 0;
+
+    while (true) {
+      final batch = await getSessionMessages(sessionId, offset: offset, limit: batchSize);
+      if (batch.isEmpty) break;
+
+      // Deduplicate: if the API doesn't support pagination, it may return
+      // all messages on every call. Track seen IDs to avoid duplicates.
+      final existingIds = allMessages.map((m) => m.id).toSet();
+      final newMessages = batch.where((m) => !existingIds.contains(m.id)).toList();
+      if (newMessages.isEmpty) break;
+
+      allMessages.addAll(newMessages);
+
+      // If we got fewer than requested, we've reached the end.
+      if (batch.length < batchSize) break;
+      offset += batchSize;
+    }
+
+    return allMessages;
   }
 
   Future<Map<String, dynamic>> getCapabilities() async => await _get('/v1/capabilities');
@@ -224,10 +255,13 @@ class GatewayService {
     return await _client.send(request);
   }
 
-  Future<Map<String, dynamic>> _get(String path, {bool auth = true}) async {
-    final uri = Uri.parse('${config.httpUrl}$path');
+  Future<Map<String, dynamic>> _get(String path, {bool auth = true, int timeoutSeconds = 10, Map<String, String>? queryParams}) async {
+    var uri = Uri.parse('${config.httpUrl}$path');
+    if (queryParams != null && queryParams.isNotEmpty) {
+      uri = uri.replace(queryParameters: queryParams);
+    }
     final headers = auth ? _headers : {'Content-Type': 'application/json'};
-    final response = await http.get(uri, headers: headers).timeout(const Duration(seconds: 10));
+    final response = await http.get(uri, headers: headers).timeout(Duration(seconds: timeoutSeconds));
     if (response.statusCode >= 400) throw Exception('HTTP ${response.statusCode}: ${response.body}');
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
