@@ -84,8 +84,8 @@ class GatewayService {
 
     // Connect WebSocket to proxy (port = gateway port + 1)
     try {
-      final wsPort = config.port + 1; // 8643
-      final wsUrl = 'ws://${config.host}:$wsPort/ws';
+      final wsPort = config.port; // same as HTTP
+      final wsUrl = 'ws://${config.host}:$wsPort/api/ws';
       debugPrint('[GatewayService] Connecting WebSocket: $wsUrl');
 
       _wsChannel = WebSocketChannel.connect(Uri.parse(wsUrl));
@@ -140,7 +140,7 @@ class GatewayService {
 
       // Timeout
       return await completer.future.timeout(
-        const Duration(seconds: 10),
+        const Duration(seconds: 1),
         onTimeout: () {
           debugPrint('[GatewayService] WS timeout, falling back to HTTP mode');
           _connected = true; // Still usable via HTTP
@@ -319,7 +319,7 @@ class GatewayService {
   Future<Map<String, dynamic>> _get(String path, {bool auth = true}) async {
     final uri = Uri.parse('${config.httpUrl}$path');
     final headers = auth ? _headers : {'Content-Type': 'application/json'};
-    final response = await http.get(uri, headers: headers).timeout(const Duration(seconds: 10));
+    final response = await http.get(uri, headers: headers).timeout(const Duration(seconds: 1));
     if (response.statusCode >= 400) {
       throw Exception('HTTP ${response.statusCode}: ${response.body}');
     }
