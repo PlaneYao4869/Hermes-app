@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/gateway_config.dart';
 import '../models/message.dart';
 import '../models/session.dart';
@@ -25,7 +26,7 @@ class GatewayConfigNotifier extends StateNotifier<GatewayConfig?> {
   void configure(GatewayConfig config) => state = config;
 }
 
-// Gateway service provider - auto-connects when config changes
+// Gateway service provider
 final gatewayServiceProvider = StateNotifierProvider<GatewayServiceNotifier, GatewayService?>((ref) {
   return GatewayServiceNotifier(ref);
 });
@@ -33,7 +34,6 @@ final gatewayServiceProvider = StateNotifierProvider<GatewayServiceNotifier, Gat
 class GatewayServiceNotifier extends StateNotifier<GatewayService?> {
   final Ref ref;
   GatewayServiceNotifier(this.ref) : super(null) {
-    // Listen to config changes and auto-create + connect
     ref.listen<GatewayConfig?>(gatewayConfigProvider, (prev, next) {
       if (next != null && next != prev) {
         _createAndConnect(next);
@@ -41,14 +41,7 @@ class GatewayServiceNotifier extends StateNotifier<GatewayService?> {
     });
   }
 
-  @override
-  void dispose() {
-    state?.dispose();
-    super.dispose();
-  }
-
   Future<void> _createAndConnect(GatewayConfig config) async {
-    // Dispose old service before creating new one
     state?.dispose();
     final service = GatewayService(config, ref);
     state = service;
@@ -63,36 +56,207 @@ class GatewayService {
   final _messageController = StreamController<GatewayEvent>.broadcast();
   final _approvalController = StreamController<ApprovalRequest>.broadcast();
 
+  WebSocketChannel? _wsChannel;
+  StreamSubscription? _wsSub;
+  bool _connected = false;
+  int _msgId = 0;
+
   Stream<GatewayEvent> get events => _messageController.stream;
   Stream<ApprovalRequest> get approvals => _approvalController.stream;
 
   GatewayService(this.config, this.ref);
 
-  // === Connection Test ===
+  // === WebSocket Connection ===
   Future<bool> connect() async {
     ref.read(connectionStateProvider.notifier).setConnecting();
+
+    // First test HTTP health
     try {
       final health = await getHealth();
-      if (health['status'] == 'ok') {
-        ref.read(connectionStateProvider.notifier).setConnected();
-        debugPrint('[GatewayService] Connected to ${config.httpUrl}');
-        return true;
+      if (health['status'] != 'ok') {
+        ref.read(connectionStateProvider.notifier).setError('Gateway not healthy');
+        return false;
       }
-      ref.read(connectionStateProvider.notifier).setError('Gateway not healthy');
-      return false;
     } catch (e) {
-      ref.read(connectionStateProvider.notifier).setError(e.toString());
-      debugPrint('[GatewayService] Connection failed: $e');
+      ref.read(connectionStateProvider.notifier).setError('Cannot reach gateway: $e');
       return false;
+    }
+
+    // Connect WebSocket to proxy (port = gateway port + 1)
+    try {
+      final wsPort = config.port + 1; // 8643
+      final wsUrl = 'ws://${config.host}:$wsPort/ws';
+      debugPrint('[GatewayService] Connecting WebSocket: $wsUrl');
+
+      _wsChannel = WebSocketChannel.connect(Uri.parse(wsUrl));
+
+      // Wait for ready signal
+      final completer = Completer<bool>();
+      _wsSub = _wsChannel!.stream.listen(
+        (data) {
+          try {
+            final msg = jsonDecode(data as String) as Map<String, dynamic>;
+            final type = msg['type'] as String? ?? '';
+
+            if (type == 'ready' && !completer.isCompleted) {
+              _connected = true;
+              ref.read(connectionStateProvider.notifier).setConnected();
+              completer.complete(true);
+              debugPrint('[GatewayService] WebSocket connected');
+            } else if (type == 'delta') {
+              _messageController.add(GatewayEvent(
+                type: GatewayEventType.messageDelta,
+                data: {'content': msg['content'] as String? ?? ''},
+              ));
+            } else if (type == 'done') {
+              _messageController.add(GatewayEvent(
+                type: GatewayEventType.messageComplete,
+                data: {'content': msg['content'] as String? ?? ''},
+              ));
+            } else if (type == 'error') {
+              _messageController.add(GatewayEvent(
+                type: GatewayEventType.error,
+                data: {'message': msg['message'] as String? ?? 'Unknown error'},
+              ));
+            } else if (type == 'pong') {
+              // Heartbeat response
+            }
+          } catch (e) {
+            debugPrint('[GatewayService] WS parse error: $e');
+          }
+        },
+        onError: (error) {
+          debugPrint('[GatewayService] WS error: $error');
+          _connected = false;
+          ref.read(connectionStateProvider.notifier).setError('WebSocket error: $error');
+          if (!completer.isCompleted) completer.complete(false);
+        },
+        onDone: () {
+          debugPrint('[GatewayService] WS closed');
+          _connected = false;
+          if (!completer.isCompleted) completer.complete(false);
+        },
+      );
+
+      // Timeout
+      return await completer.future.timeout(
+        const Duration(seconds: 10),
+        onTimeout: () {
+          debugPrint('[GatewayService] WS timeout, falling back to HTTP mode');
+          _connected = true; // Still usable via HTTP
+          ref.read(connectionStateProvider.notifier).setConnected();
+          return true;
+        },
+      );
+    } catch (e) {
+      debugPrint('[GatewayService] WS connect failed: $e, using HTTP mode');
+      _connected = true; // Fallback to HTTP
+      ref.read(connectionStateProvider.notifier).setConnected();
+      return true;
     }
   }
 
   void disconnect() {
+    _wsSub?.cancel();
+    _wsChannel?.sink.close();
+    _wsChannel = null;
+    _connected = false;
     ref.read(connectionStateProvider.notifier).setDisconnected();
   }
 
-  // === REST API Methods ===
+  // === Send chat via WebSocket ===
+  Future<void> sendChat(String content, {String? sessionId}) async {
+    if (_wsChannel != null && _connected) {
+      // Send via WebSocket
+      final msgId = ++_msgId;
+      _wsChannel!.sink.add(jsonEncode({
+        'type': 'chat',
+        'session_id': sessionId,
+        'content': content,
+        'id': msgId,
+      }));
+    } else {
+      // Fallback to HTTP SSE
+      await _sendChatHttp(content, sessionId: sessionId);
+    }
+  }
 
+  // === HTTP SSE fallback ===
+  Future<void> _sendChatHttp(String content, {String? sessionId}) async {
+    try {
+      final streamedResponse = await _sendChatRequest(content, sessionId: sessionId);
+      String fullContent = '';
+      String currentEvent = '';
+
+      await for (final chunk in streamedResponse.stream.transform(utf8.decoder).transform(const LineSplitter())) {
+        if (chunk.startsWith('event: ')) {
+          currentEvent = chunk.substring(7).trim();
+          continue;
+        }
+        if (!chunk.startsWith('data: ')) continue;
+
+        final data = chunk.substring(6).trim();
+        if (data == '[DONE]') break;
+        if (data.isEmpty) continue;
+
+        try {
+          final json = jsonDecode(data) as Map<String, dynamic>;
+
+          // OpenAI format
+          final choices = json['choices'] as List?;
+          if (choices != null && choices.isNotEmpty) {
+            final delta = choices[0]['delta'] as Map<String, dynamic>?;
+            if (delta != null) {
+              final c = delta['content'] as String? ?? '';
+              if (c.isNotEmpty) {
+                fullContent += c;
+                _messageController.add(GatewayEvent(
+                  type: GatewayEventType.messageDelta,
+                  data: {'content': c},
+                ));
+              }
+            }
+            continue;
+          }
+
+          // Hermes session format
+          if (currentEvent == 'assistant.delta') {
+            final c = json['delta'] as String? ?? '';
+            if (c.isNotEmpty) {
+              fullContent += c;
+              _messageController.add(GatewayEvent(
+                type: GatewayEventType.messageDelta,
+                data: {'content': c},
+              ));
+            }
+            continue;
+          }
+
+          if (currentEvent == 'assistant.completed') {
+            final finalContent = json['content'] as String? ?? '';
+            if (finalContent.isNotEmpty) fullContent = finalContent;
+            continue;
+          }
+
+          if (currentEvent == 'message.started' || currentEvent == 'run.started' || currentEvent == 'run.completed') {
+            continue;
+          }
+        } catch (_) {}
+      }
+
+      _messageController.add(GatewayEvent(
+        type: GatewayEventType.messageComplete,
+        data: {'content': fullContent},
+      ));
+    } catch (e) {
+      _messageController.add(GatewayEvent(
+        type: GatewayEventType.error,
+        data: {'message': e.toString()},
+      ));
+    }
+  }
+
+  // === REST API Methods ===
   Future<Map<String, dynamic>> getHealth() async {
     return await _get('/health', auth: false);
   }
@@ -109,95 +273,6 @@ class GatewayService {
     return list.map((m) => ChatMessage.fromJson(m as Map<String, dynamic>)).toList();
   }
 
-  /// Send a chat message. If sessionId exists, sends to that session (continues conversation).
-  /// If no sessionId, uses the general chat completions endpoint.
-  Future<String> sendChat(String content, {String? sessionId}) async {
-    final streamedResponse = await _sendChatRequest(content, sessionId: sessionId);
-    String fullContent = '';
-    String currentEvent = '';
-
-    await for (final chunk in streamedResponse.stream.transform(utf8.decoder).transform(const LineSplitter())) {
-      // Track SSE event type
-      if (chunk.startsWith('event: ')) {
-        currentEvent = chunk.substring(7).trim();
-        continue;
-      }
-      if (!chunk.startsWith('data: ')) continue;
-
-      final data = chunk.substring(6).trim();
-      if (data == '[DONE]') break;
-      if (data.isEmpty) continue;
-
-      try {
-        final json = jsonDecode(data) as Map<String, dynamic>;
-
-        // Format 1: OpenAI chat completions — choices[0].delta.content
-        final choices = json['choices'] as List?;
-        if (choices != null && choices.isNotEmpty) {
-          final delta = choices[0]['delta'] as Map<String, dynamic>?;
-          if (delta != null) {
-            final c = delta['content'] as String? ?? '';
-            if (c.isNotEmpty) {
-              fullContent += c;
-              _messageController.add(GatewayEvent(
-                type: GatewayEventType.messageDelta,
-                data: {'content': c},
-              ));
-            }
-          }
-          continue;
-        }
-
-        // Format 2: Hermes session chat — assistant.delta event with delta field
-        if (currentEvent == 'assistant.delta') {
-          final c = json['delta'] as String? ?? json['content'] as String? ?? '';
-          if (c.isNotEmpty) {
-            fullContent += c;
-            _messageController.add(GatewayEvent(
-              type: GatewayEventType.messageDelta,
-              data: {'content': c},
-            ));
-          }
-          continue;
-        }
-
-        // Format 3: Hermes session chat — assistant.completed (final message)
-        if (currentEvent == 'assistant.completed') {
-          final finalContent = json['content'] as String? ?? '';
-          if (finalContent.isNotEmpty) {
-            fullContent = finalContent;
-          }
-          continue;
-        }
-
-        // Format 4: Hermes session chat — message.started, run.started, run.completed (metadata)
-        if (currentEvent == 'message.started' || currentEvent == 'run.started' || currentEvent == 'run.completed') {
-          continue;
-        }
-
-        // Format 5: tool.progress events
-        if (currentEvent == 'tool.progress') {
-          _messageController.add(GatewayEvent(
-            type: GatewayEventType.toolStart,
-            data: {
-              'id': json['message_id'] as String? ?? '',
-              'name': json['tool_name'] as String? ?? '',
-              'preview': json['preview'] as String? ?? '',
-            },
-          ));
-          continue;
-        }
-      } catch (_) {}
-    }
-
-    _messageController.add(GatewayEvent(
-      type: GatewayEventType.messageComplete,
-      data: {'content': fullContent},
-    ));
-
-    return fullContent;
-  }
-
   Future<AgentRun> createRun(String prompt, {String? sessionId}) async {
     final body = <String, dynamic>{'model': 'default', 'input': prompt};
     if (sessionId != null) body['session_id'] = sessionId;
@@ -205,17 +280,8 @@ class GatewayService {
     return AgentRun.fromJson(response);
   }
 
-  Future<AgentRun> getRun(String runId) async {
-    final response = await _get('/v1/runs/$runId');
-    return AgentRun.fromJson(response);
-  }
-
   Future<void> approveAction(String runId, String approvalId, bool approved) async {
     await _post('/v1/runs/$runId/approval', {'approval_id': approvalId, 'approved': approved});
-  }
-
-  Future<void> stopRun(String runId) async {
-    await _post('/v1/runs/$runId/stop', {});
   }
 
   Future<Map<String, dynamic>> getCapabilities() async {
@@ -223,16 +289,22 @@ class GatewayService {
   }
 
   // === HTTP helpers ===
+  http.Client get _client => http.Client();
+
+  Map<String, String> get _headers => {
+    'Content-Type': 'application/json',
+    if (config.token != null && config.token!.isNotEmpty)
+      'Authorization': 'Bearer ${config.token}',
+  };
+
   Future<http.StreamedResponse> _sendChatRequest(String content, {String? sessionId}) async {
     http.Request request;
     if (sessionId != null) {
-      // Continue existing session via session-specific endpoint
       final uri = Uri.parse('${config.httpUrl}/api/sessions/$sessionId/chat/stream');
       request = http.Request('POST', uri);
       request.headers.addAll(_headers);
       request.body = jsonEncode({'message': content, 'stream': true});
     } else {
-      // New conversation via general chat completions
       final uri = Uri.parse('${config.httpUrl}/v1/chat/completions');
       request = http.Request('POST', uri);
       request.headers.addAll(_headers);
@@ -243,14 +315,6 @@ class GatewayService {
     }
     return await _client.send(request);
   }
-
-  http.Client get _client => http.Client();
-
-  Map<String, String> get _headers => {
-    'Content-Type': 'application/json',
-    if (config.token != null && config.token!.isNotEmpty)
-      'Authorization': 'Bearer ${config.token}',
-  };
 
   Future<Map<String, dynamic>> _get(String path, {bool auth = true}) async {
     final uri = Uri.parse('${config.httpUrl}$path');
@@ -272,6 +336,8 @@ class GatewayService {
   }
 
   void dispose() {
+    _wsSub?.cancel();
+    _wsChannel?.sink.close();
     _messageController.close();
     _approvalController.close();
   }
