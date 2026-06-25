@@ -124,7 +124,8 @@ class WSProxy:
                         if resp.status == 200:
                             body = await resp.json()
                             messages = body.get("data", [])
-                            for msg in messages:
+                            new_msgs = [m for m in messages if int(m.get("id", 0)) > after_id]
+                            for msg in new_msgs:
                                 await ws.send_json({
                                     "type": "message",
                                     "message": msg,
