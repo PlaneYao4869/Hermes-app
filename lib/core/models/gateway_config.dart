@@ -16,7 +16,7 @@ class GatewayConfig {
   String get wsUrl {
     final scheme = useTls ? 'wss' : 'ws';
     final actualHost = tailscaleIp ?? host;
-    return '$scheme://$actualHost:$port/api/ws';
+    return '$scheme://$actualHost:8643/ws';
   }
 
   String get httpUrl {
