@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
-import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/gateway_config.dart';
 import '../models/message.dart';
 import '../models/session.dart';
@@ -56,21 +55,17 @@ class GatewayService {
   final _messageController = StreamController<GatewayEvent>.broadcast();
   final _approvalController = StreamController<ApprovalRequest>.broadcast();
 
-  WebSocketChannel? _wsChannel;
-  StreamSubscription? _wsSub;
   bool _connected = false;
-  int _msgId = 0;
 
   Stream<GatewayEvent> get events => _messageController.stream;
   Stream<ApprovalRequest> get approvals => _approvalController.stream;
 
   GatewayService(this.config, this.ref);
 
-  // === WebSocket Connection ===
+  // === HTTP Connection ===
   Future<bool> connect() async {
     ref.read(connectionStateProvider.notifier).setConnecting();
 
-    // First test HTTP health
     try {
       final health = await getHealth();
       if (health['status'] != 'ok') {
@@ -82,106 +77,24 @@ class GatewayService {
       return false;
     }
 
-    // Connect WebSocket to proxy (port = gateway port + 1)
-    try {
-      final wsPort = config.port; // same as HTTP
-      final wsUrl = 'ws://${config.host}:$wsPort/api/ws';
-      debugPrint('[GatewayService] Connecting WebSocket: $wsUrl');
-
-      _wsChannel = WebSocketChannel.connect(Uri.parse(wsUrl));
-
-      // Wait for ready signal
-      final completer = Completer<bool>();
-      _wsSub = _wsChannel!.stream.listen(
-        (data) {
-          try {
-            final msg = jsonDecode(data as String) as Map<String, dynamic>;
-            final type = msg['type'] as String? ?? '';
-
-            if (type == 'ready' && !completer.isCompleted) {
-              _connected = true;
-              ref.read(connectionStateProvider.notifier).setConnected();
-              completer.complete(true);
-              debugPrint('[GatewayService] WebSocket connected');
-            } else if (type == 'delta') {
-              _messageController.add(GatewayEvent(
-                type: GatewayEventType.messageDelta,
-                data: {'content': msg['content'] as String? ?? ''},
-              ));
-            } else if (type == 'done') {
-              _messageController.add(GatewayEvent(
-                type: GatewayEventType.messageComplete,
-                data: {'content': msg['content'] as String? ?? ''},
-              ));
-            } else if (type == 'error') {
-              _messageController.add(GatewayEvent(
-                type: GatewayEventType.error,
-                data: {'message': msg['message'] as String? ?? 'Unknown error'},
-              ));
-            } else if (type == 'pong') {
-              // Heartbeat response
-            }
-          } catch (e) {
-            debugPrint('[GatewayService] WS parse error: $e');
-          }
-        },
-        onError: (error) {
-          debugPrint('[GatewayService] WS error: $error');
-          _connected = false;
-          ref.read(connectionStateProvider.notifier).setError('WebSocket error: $error');
-          if (!completer.isCompleted) completer.complete(false);
-        },
-        onDone: () {
-          debugPrint('[GatewayService] WS closed');
-          _connected = false;
-          if (!completer.isCompleted) completer.complete(false);
-        },
-      );
-
-      // Timeout
-      return await completer.future.timeout(
-        const Duration(seconds: 1),
-        onTimeout: () {
-          debugPrint('[GatewayService] WS timeout, falling back to HTTP mode');
-          _connected = true; // Still usable via HTTP
-          ref.read(connectionStateProvider.notifier).setConnected();
-          return true;
-        },
-      );
-    } catch (e) {
-      debugPrint('[GatewayService] WS connect failed: $e, using HTTP mode');
-      _connected = true; // Fallback to HTTP
-      ref.read(connectionStateProvider.notifier).setConnected();
-      return true;
-    }
+    // Connected via HTTP (REST + SSE) — no WebSocket needed
+    _connected = true;
+    ref.read(connectionStateProvider.notifier).setConnected();
+    debugPrint('[GatewayService] HTTP connected to ${config.httpUrl}');
+    return true;
   }
 
   void disconnect() {
-    _wsSub?.cancel();
-    _wsChannel?.sink.close();
-    _wsChannel = null;
     _connected = false;
     ref.read(connectionStateProvider.notifier).setDisconnected();
   }
 
-  // === Send chat via WebSocket ===
+  // === Send chat via HTTP SSE ===
   Future<void> sendChat(String content, {String? sessionId}) async {
-    if (_wsChannel != null && _connected) {
-      // Send via WebSocket
-      final msgId = ++_msgId;
-      _wsChannel!.sink.add(jsonEncode({
-        'type': 'chat',
-        'session_id': sessionId,
-        'content': content,
-        'id': msgId,
-      }));
-    } else {
-      // Fallback to HTTP SSE
-      await _sendChatHttp(content, sessionId: sessionId);
-    }
+    await _sendChatHttp(content, sessionId: sessionId);
   }
 
-  // === HTTP SSE fallback ===
+  // === HTTP SSE streaming ===
   Future<void> _sendChatHttp(String content, {String? sessionId}) async {
     try {
       final streamedResponse = await _sendChatRequest(content, sessionId: sessionId);
@@ -336,8 +249,6 @@ class GatewayService {
   }
 
   void dispose() {
-    _wsSub?.cancel();
-    _wsChannel?.sink.close();
     _messageController.close();
     _approvalController.close();
   }

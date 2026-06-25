@@ -15,7 +15,6 @@ dependencies:
   flutter_riverpod: ^2.5.1
 
   # Networking
-  web_socket_channel: ^3.0.3
   http: ^1.2.1
   connectivity_plus: ^6.0.3
 
