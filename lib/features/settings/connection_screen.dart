@@ -90,6 +90,10 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
   }
 
   void _connect(GatewayConfig config) {
+    // Save token for future manual connections
+    if (config.token != null && config.token!.isNotEmpty) {
+      _ManualConnectFormState.saveToken(config.token);
+    }
     // Just set config — the provider auto-creates service and connects
     ref.read(gatewayConfigProvider.notifier).configure(config);
     ScaffoldMessenger.of(context).showSnackBar(
@@ -249,7 +253,6 @@ class _ManualConnectForm extends StatefulWidget {
 class _ManualConnectFormState extends State<_ManualConnectForm> {
   final _hostController = TextEditingController();
   final _portController = TextEditingController(text: '8642');
-  final _tokenController = TextEditingController();
 
   @override
   Widget build(BuildContext context) {
@@ -261,7 +264,7 @@ class _ManualConnectFormState extends State<_ManualConnectForm> {
             controller: _hostController,
             decoration: const InputDecoration(
               labelText: '主机地址',
-              hintText: '192.168.1.100 或 tailscale-ip',
+              hintText: '192.168.x.x 或 Tailscale IP',
             ),
           ),
           const SizedBox(height: 12),
@@ -270,21 +273,22 @@ class _ManualConnectFormState extends State<_ManualConnectForm> {
             decoration: const InputDecoration(labelText: '端口'),
             keyboardType: TextInputType.number,
           ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _tokenController,
-            decoration: const InputDecoration(labelText: 'Token (可选)'),
-            obscureText: true,
-          ),
           const SizedBox(height: 16),
+          const Text(
+            '提示: 手动连接需要先通过 QR 码配对（token 会自动保存）',
+            style: TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+          const SizedBox(height: 8),
           SizedBox(
             width: double.infinity,
             child: FilledButton(
               onPressed: () {
+                // Try to use saved token
+                final savedToken = _savedToken;
                 final config = GatewayConfig(
                   host: _hostController.text.trim(),
                   port: int.tryParse(_portController.text) ?? 8642,
-                  token: _tokenController.text.isNotEmpty ? _tokenController.text : null,
+                  token: savedToken,
                 );
                 widget.onConnect(config);
               },
@@ -295,6 +299,10 @@ class _ManualConnectFormState extends State<_ManualConnectForm> {
       ),
     );
   }
+
+  // Token is saved from last QR scan
+  static String? _savedToken;
+  static void saveToken(String? token) => _savedToken = token;
 }
 
 // === Status Card ===
